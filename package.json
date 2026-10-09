@@ -1,0 +1,11 @@
+{
+  "name": "spacetel-operational-excellence",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Spacetel Operational Excellence dashboard (Netlify + Netlify Blobs)",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
+  }
+}

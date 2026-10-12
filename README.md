@@ -5,66 +5,74 @@ Static dashboard (`public/index.html`) + one Netlify Function (`netlify/function
 | Who | Can do |
 |---|---|
 | **Anyone with the link (viewers)** | See the latest published report, use search / filters, tab switching, copy image, PNG, Excel export |
-| **Master login** | Everything above, plus upload the workbook (publishes it for everyone), view / open / delete the **Log** |
+| **Signed-in user** (Lokesh, Anand, Upender, Venu) | Everything above, plus upload the workbook (publishes it for everyone), view / open / delete the **Log**, and **change their own password** |
 
-The master password is checked **on the server**. Upload and Log endpoints reject requests without a valid master session, so hiding buttons is not the only protection.
+Every user has their own account and password. Who you are is decided by the server from your login; the browser never tells the server a name. Upload, Log and password endpoints reject requests without a valid session, so hiding buttons is not the only protection.
 
-## Deploy (GitHub → Netlify)
+## What changed in this version
+- **Four individual accounts** replace the single shared master login.
+- **Log → Updated By** column: the name of the user who published each upload (older entries show `Legacy / unknown`).
+- **Change Password** inside the app (click your name at the bottom right → Change password). No Netlify or GitHub access needed.
 
-1. Create a **private** GitHub repo and push this folder:
+Files changed: `public/index.html`, `netlify/functions/api.mjs`, `package.json` (Blobs library `^8` → `^10`), `README.md`. `netlify.toml`, `.gitignore` and `public/vendor/*` are unchanged.
+
+## Deploy / update (GitHub → Netlify)
+
+### A. First setup, or moving to this version
+1. Copy these files over your existing repo (keep the same folder structure), then:
    ```bash
-   cd spacetel-operational-excellence
-   git init && git add . && git commit -m "Operational Excellence dashboard"
-   git branch -M main
-   git remote add origin https://github.com/<you>/<repo>.git
-   git push -u origin main
+   git add .
+   git commit -m "Individual logins, Updated By log column, change password"
+   git push
    ```
-2. In Netlify: **Add new site → Import an existing project → GitHub →** pick the repo.
-   Build settings are read from `netlify.toml` (publish `public`, functions `netlify/functions`). Leave build command empty. Deploy.
-3. In Netlify → **Site configuration → Environment variables**, set these four initial passwords:
-   - `LOKESH_PASSWORD`
-   - `ANAND_PASSWORD`
-   - `UPENDER_PASSWORD`
-   - `VENU_PASSWORD`
+   Netlify redeploys automatically (publish `public`, functions `netlify/functions`, no build command).
+2. In Netlify: **Site configuration → Environment variables** add these (they are **not** in the code or the ZIP):
 
-   Also set `SESSION_SECRET` to a long, random, stable secret. These four password variables initialize the credential store on first login only. After that, changed passwords are saved as salted scrypt hashes in Netlify Blobs. Do not commit actual passwords to GitHub.
-4. Trigger a deploy, then open the site URL → click **🔒 Master login** (bottom-right) → log in and upload the workbook.
+   | Variable | Value |
+   |---|---|
+   | `LOKESH_PASSWORD` | Lokesh's initial password |
+   | `ANAND_PASSWORD` | Anand's initial password |
+   | `UPENDER_PASSWORD` | Upender's initial password |
+   | `VENU_PASSWORD` | Venu's initial password |
+   | `SESSION_SECRET` | a long random string (e.g. 40+ random characters). Keep it the same forever; changing it signs everyone out |
+
+   Set the variables **before** the first login. Then **Deploys → Trigger deploy → Deploy site** so the function sees them.
+3. Open the site → **🔒 Login** → pick your name → enter your initial password. Then use **Change password** to pick your own.
+
+### B. How accounts are stored
+- The first time an account logs in, its initial password (from the environment variable) is hashed with salted scrypt and saved in Netlify Blobs (`users/<name>`). Plain passwords are never stored.
+- After that, **Blobs is the source of truth**. Redeploying, or changing/removing the environment variables, does **not** change an existing account's password.
+- If two people hit a brand-new account at the same moment, only one record is created (conditional "only if new" write).
+
+### C. Forgot a password
+There is no email reset. To reset one account: delete that account's record from the site's Blobs store (`operational-excellence`, key `users/<name>`, e.g. `users/anand`) using the Netlify CLI (`netlify blobs:delete operational-excellence users/anand`) or the Blobs page of your site in the Netlify dashboard, make sure the matching `*_PASSWORD` variable holds the temporary password you want, and have the user log in with it, then change it. (Check the exact CLI syntax with `netlify blobs:delete --help`.)
 
 ## Daily use
-- Master logs in, uploads the day's Excel workbook. It is processed in the browser, then published. Everyone who opens (or refreshes) the site sees it.
-- Each upload is also saved to the **Log** tab (the latest 100 are kept). Re-uploading identical data updates the report but is not logged twice.
-- Master sessions last 12 hours or until the tab is closed / Log out.
+- Log in, upload the day's Excel workbook. It is processed in the browser, then published. Everyone who opens (or refreshes) the site sees it.
+- Each publish is saved to the **Log** tab with your name (the latest 100 are kept). Re-uploading identical data updates the report but is not logged twice.
+- Sessions last 12 hours or until the tab is closed / Log out. Changing your password keeps *this* browser signed in; any other browser signed in as you is signed out.
 
-## Changing a password
-After logging in, click the bottom-right **Master · Log out** button. In the login panel, click **Change password**. Enter the current password and the new password twice. New passwords must be at least 8 characters. Changes take effect immediately and do not require a redeploy. Each user can change only the password for the account they are currently logged into.
+## Security notes
+- Passwords: salted scrypt, verified on the server only. Minimum 8 characters for new passwords.
+- Sessions: signed with `SESSION_SECRET`; the account is re-checked on every request. (If `SESSION_SECRET` is missing, a random secret is generated once and kept in Blobs, but please set it.)
+- Brute-force protection is stored in Blobs, so it applies across all function instances: 8 wrong passwords per visitor per account, 30 per account overall, within 15 minutes. Wrong "current password" attempts on the change form are limited the same way.
+- Reports are visible to anyone with the URL. For a restricted audience use Netlify's site password / SSO (paid plans) or keep the URL private.
+- Libraries (SheetJS, ExcelJS, html2canvas) are bundled in `public/vendor`. Only the Inter font is loaded from Google Fonts.
 
 ## Local testing
 ```bash
 npm i -g netlify-cli
 npm install
+# create a local .env (git-ignored) with LOKESH_PASSWORD, ANAND_PASSWORD, UPENDER_PASSWORD, VENU_PASSWORD, SESSION_SECRET
 netlify dev        # http://localhost:8888
 ```
 
-## Notes
-- Libraries (SheetJS, ExcelJS, html2canvas) are bundled in `public/vendor`, so the page doesn't depend on a CDN. Only the Inter font is loaded from Google Fonts (falls back to system fonts if blocked).
-- Reports are visible to anyone who has the URL. For a restricted audience, use Netlify's site password / SSO protection (paid plans) or keep the URL private.
-- After 8 wrong passwords from one IP within 10 minutes, login is temporarily blocked.
-
-
-## Individual editor passwords and audit log
-
-Configure these four environment variables in Netlify site settings (Site configuration → Environment variables), then redeploy:
-
-- `LOKESH_PASSWORD` — password for Lokesh
-- `ANAND_PASSWORD` — password for Anand
-- `UPENDER_PASSWORD` — password for Upender
-- `VENU_PASSWORD` — password for Venu
-
-Use four different, strong passwords and share each only with its owner. Do not put passwords in the HTML or commit them to GitHub. When a password is used to publish changed data, the Log tab records the authenticated user's name in the **Updated By** column. Existing log entries created before this feature may show **Legacy / unknown**.
-
-
-## In-dashboard password changes
-
-Configure `LOKESH_PASSWORD`, `ANAND_PASSWORD`, `UPENDER_PASSWORD`, and `VENU_PASSWORD` in Netlify before the first login. Set a long, stable `SESSION_SECRET` in Netlify. These initial passwords bootstrap the account store on first login; after that, credentials are saved as salted scrypt hashes in Netlify Blobs. Do not commit actual passwords to GitHub.
-
-After logging in, click the bottom-right **Master · Log out** button, then choose **Change password**. Enter the current password and the new password twice. New passwords must be at least 8 characters. Changes take effect immediately and do not require redeployment. Each user can change only the password for the account they are logged into.
+## Test plan after deploying (about 10 minutes)
+1. Log in as each of the four users with their initial password → each sees upload + Log.
+2. Wrong password, and another person's password, → "Wrong user or password."; the 9th quick failure shows "Too many attempts".
+3. As Lokesh upload a workbook → Log shows Updated By = Lokesh. Repeat as Anand and Venu → names match.
+4. Open a log, go back, delete a test log.
+5. As Anand: **Change password** with a wrong current password (error), a 5-character new password (error), mismatched confirmation (error), then a valid change → success, still signed in.
+6. Log out → old password fails, new password works.
+7. **Persistence:** Deploys → Trigger deploy. After it finishes, log in with the *new* password (it must work) and the *original* password must fail.
+8. Open the site in a private window (not logged in): the report shows with filters, no upload box, no Log tab. Visit `/api/logs` in that window → `{"error":"Login required."}`.

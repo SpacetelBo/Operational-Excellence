@@ -3,6 +3,8 @@
 // Public  : GET  /api/report            latest published report (anyone can view)
 //           GET  /api/users             the account names shown in the login list (names only)
 //           POST /api/login             { user, password } -> session token
+//           POST /api/register/request  { username } -> emails a one-time code (OTP) to the back office
+//           POST /api/register/complete { username, otp, password } -> creates that account and signs in
 // Signed in (any of the four accounts):
 //           GET  /api/session           who am I (name comes from the signed session)
 //           POST /api/password          { current, next } change MY password
@@ -30,6 +32,17 @@ const USERS = [
   { id: "upender", name: "Upender", env: "UPENDER_PASSWORD" },
   { id: "venu", name: "Venu", env: "VENU_PASSWORD" },
 ];
+
+// Self-service accounts: username must be exactly 2 letters + 4 digits + @cricketlogin.com (e.g. vr6584@cricketlogin.com).
+// The one-time code is emailed ONLY to this address. The requester never sees it; the back office gives it to them.
+const OTP_TO = "backoffice@spacetelllc.com";
+const REG_ID = /^[a-z]{2}[0-9]{4}@cricketlogin\.com$/;
+const OTP_TTL_MS = 10 * 60 * 1000;      // a code is valid for 10 minutes
+const OTP_RESEND_MS = 60 * 1000;        // at least 60 s between codes for the same username
+const MAX_OTP_TRIES = 5;                // wrong codes allowed per code
+const MAX_OTP_REQ_PER_IP_HOUR = 5;      // codes one visitor can trigger per hour
+const MAX_OTP_REQ_PER_HOUR = 30;        // codes anyone can trigger per hour (protects the back-office mailbox)
+const HOUR_MS = 60 * 60 * 1000;
 
 const TOKEN_TTL_MS = 12 * 60 * 60 * 1000; // sessions last 12 hours
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
@@ -132,18 +145,49 @@ async function authenticate(req, s) {
 }
 
 // ---------- brute-force protection (shared by every function instance, kept in Blobs) ----------
-async function isBlocked(s, key, max) {
+async function isBlocked(s, key, max, windowMs = THROTTLE_WINDOW_MS) {
   const r = await s.get(key, { type: "json" });
-  return !!r && Date.now() - r.t < THROTTLE_WINDOW_MS && r.n >= max;
+  return !!r && Date.now() - r.t < windowMs && r.n >= max;
 }
-async function recordFail(s, key) {
+async function recordFail(s, key, windowMs = THROTTLE_WINDOW_MS) {
   const now = Date.now();
   let r = await s.get(key, { type: "json" });
-  if (!r || now - r.t >= THROTTLE_WINDOW_MS) r = { n: 0, t: now };
+  if (!r || now - r.t >= windowMs) r = { n: 0, t: now };
   r.n++;
   await s.setJSON(key, r);
 }
 const clientIp = (req, context) => context?.ip || req.headers.get("x-nf-client-connection-ip") || "unknown";
+
+// ---------- one-time codes (OTP) for self-service sign-up ----------
+const normId = (v) => (typeof v === "string" ? v.trim().toLowerCase() : "");
+const pendingKey = (id) => "pending/" + sha(id).slice(0, 32);
+const otpHash = (secret, id, otp) => crypto.createHmac("sha256", secret).update("otp|" + id + "|" + otp).digest("hex");
+const displayName = (id) => id.split("@")[0].toUpperCase();
+
+// Sends the code to the back office through Resend (https://resend.com). Needs RESEND_API_KEY.
+// OTP_FROM is optional; without it Resend's test sender is used, which can only deliver to the address the
+// Resend account was created with. To send from your own domain, verify the domain in Resend and set OTP_FROM.
+async function sendOtpEmail({ id, otp, ip, now }) {
+  const key = process.env.RESEND_API_KEY;
+  if (!key) throw Object.assign(new Error("email-not-configured"), { code: "noemail" });
+  const from = process.env.OTP_FROM || "Operational Excellence <onboarding@resend.dev>";
+  const when = new Date(now).toUTCString();
+  const text =
+    `Someone asked to create an account on the Operational Excellence dashboard.\n\n` +
+    `Username: ${id}\nOTP: ${otp}\nValid for 10 minutes.\n\n` +
+    `Requested ${when} from IP ${ip}.\n\n` +
+    `Give this OTP only to the person who owns this Cricket login. If you do not recognise the request, ignore this email.`;
+  const html =
+    `<p>Someone asked to create an account on the <b>Operational Excellence</b> dashboard.</p>` +
+    `<p>Username: <b>${id}</b><br>OTP: <b style="font-size:20px;letter-spacing:3px">${otp}</b><br>Valid for 10 minutes.</p>` +
+    `<p style="color:#555">Requested ${when} from IP ${ip}.<br>Give this OTP only to the person who owns this Cricket login. If you do not recognise the request, ignore this email.</p>`;
+  const r = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { authorization: "Bearer " + key, "content-type": "application/json" },
+    body: JSON.stringify({ from, to: [OTP_TO], subject: `Operational Excellence OTP for ${id}`, text, html }),
+  });
+  if (!r.ok) throw new Error("email-failed-" + r.status);
+}
 
 // ---------- small helpers ----------
 async function readBody(req) {
@@ -186,13 +230,96 @@ export default async (req, context) => {
       return json({ users: USERS.map((u) => ({ id: u.id, name: u.name })) });
     }
 
+    // ---------- self-service sign-up, step 1: email a code to the back office ----------
+    if (route === "register/request" && method === "POST") {
+      if (process.env.SIGNUP_DISABLED === "1") return json({ error: "Creating accounts is turned off. Please contact the administrator." }, 403);
+      let body;
+      try { body = await readBody(req); } catch { return json({ error: "Bad request." }, 400); }
+      const id = normId(body.username);
+      if (!REG_ID.test(id)) {
+        return json({ error: "Username must look like vr6584@cricketlogin.com: 2 letters, 4 digits, then @cricketlogin.com." }, 400);
+      }
+      if (await s.get(userKey(id), { type: "json" })) return json({ error: "This username is already registered. Please log in instead." }, 409);
+
+      const ip = clientIp(req, context);
+      const ipKey = "throttle/otpip/" + sha(ip).slice(0, 32);
+      const allKey = "throttle/otp-all";
+      if ((await isBlocked(s, ipKey, MAX_OTP_REQ_PER_IP_HOUR, HOUR_MS)) || (await isBlocked(s, allKey, MAX_OTP_REQ_PER_HOUR, HOUR_MS))) {
+        return json({ error: "Too many OTP requests. Please try again later." }, 429);
+      }
+      const now = Date.now();
+      const old = await s.get(pendingKey(id), { type: "json" });
+      if (old && now - old.createdAt < OTP_RESEND_MS) {
+        const wait = Math.ceil((OTP_RESEND_MS - (now - old.createdAt)) / 1000);
+        return json({ error: `An OTP was just sent. Please wait ${wait} seconds before asking for another.` }, 429);
+      }
+      await recordFail(s, ipKey, HOUR_MS); // every request counts, whether or not the email goes out
+      await recordFail(s, allKey, HOUR_MS);
+
+      const otp = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+      await s.setJSON(pendingKey(id), { createdAt: now, exp: now + OTP_TTL_MS, tries: 0, h: otpHash(await sessionSecret(s), id, otp) });
+      try {
+        await sendOtpEmail({ id, otp, ip, now });
+      } catch (e) {
+        await s.delete(pendingKey(id)).catch(() => {});
+        console.error("otp email failed:", e && e.message);
+        return json({ error: e && e.code === "noemail" ? "Email is not set up yet. Please contact the administrator." : "The OTP email could not be sent. Please try again, or contact the administrator." }, 503);
+      }
+      return json({ ok: true, expiresInMinutes: Math.round(OTP_TTL_MS / 60000) }); // the code is never returned to the browser
+    }
+
+    // ---------- self-service sign-up, step 2: code + chosen password -> account ----------
+    if (route === "register/complete" && method === "POST") {
+      if (process.env.SIGNUP_DISABLED === "1") return json({ error: "Creating accounts is turned off. Please contact the administrator." }, 403);
+      let body;
+      try { body = await readBody(req); } catch { return json({ error: "Bad request." }, 400); }
+      const id = normId(body.username);
+      const otp = typeof body.otp === "string" ? body.otp.trim() : "";
+      const pw = typeof body.password === "string" ? body.password : "";
+      if (!REG_ID.test(id)) return json({ error: "Username must look like vr6584@cricketlogin.com." }, 400);
+      if (!/^[0-9]{6}$/.test(otp)) return json({ error: "Enter the 6-digit OTP." }, 400);
+      if (pw.length < MIN_PASSWORD) return json({ error: `The password must be at least ${MIN_PASSWORD} characters.` }, 400);
+      if (pw.length > MAX_PASSWORD) return json({ error: "The password is too long." }, 400);
+
+      const gKey = "throttle/regip/" + sha(clientIp(req, context) + "|" + id).slice(0, 32);
+      if (await isBlocked(s, gKey, 12)) return json({ error: "Too many attempts. Try again in a few minutes." }, 429);
+
+      // Reserve one attempt BEFORE checking the code. Each guess therefore costs a slot even when requests
+      // arrive in parallel, so at most MAX_OTP_TRIES guesses are ever checked against one code.
+      let pend = null;
+      for (let i = 0; i < 8 && !pend; i++) {
+        const got = await s.getWithMetadata(pendingKey(id), { type: "json" });
+        if (!got) return json({ error: "No OTP was requested for this username, or it was already used. Request a new OTP." }, 400);
+        if (got.data.exp < Date.now()) { await s.delete(pendingKey(id)).catch(() => {}); return json({ error: "This OTP has expired. Request a new one." }, 410); }
+        if (got.data.tries >= MAX_OTP_TRIES) { await s.delete(pendingKey(id)).catch(() => {}); return json({ error: "Too many wrong OTP attempts. Request a new OTP." }, 429); }
+        const w = await s.setJSON(pendingKey(id), { ...got.data, tries: got.data.tries + 1 }, { onlyIfMatch: got.etag });
+        if (w.modified) pend = { ...got.data, tries: got.data.tries + 1 };
+      }
+      if (!pend) return json({ error: "The server is busy. Please try again." }, 409);
+
+      const want = Buffer.from(pend.h, "hex");
+      const have = Buffer.from(otpHash(await sessionSecret(s), id, otp), "hex");
+      if (!eqBuf(have, want)) {
+        await recordFail(s, gKey);
+        await sleep(700);
+        const left = MAX_OTP_TRIES - pend.tries;
+        return json({ error: left > 0 ? `Incorrect OTP. ${left} attempt${left === 1 ? "" : "s"} left.` : "Incorrect OTP. Request a new OTP." }, 403);
+      }
+      const rec = { id, name: displayName(id), cred: await hashPassword(pw), ver: 1, createdAt: Date.now(), changedAt: null, self: true };
+      const w = await s.setJSON(userKey(id), rec, { onlyIfNew: true }); // never overwrites an existing account
+      await s.delete(pendingKey(id)).catch(() => {});
+      if (!w.modified) return json({ error: "This username is already registered. Please log in instead." }, 409);
+      const { token, exp } = await makeToken(s, rec);
+      return json({ ok: true, token, exp, user: { id: rec.id, name: rec.name } });
+    }
+
     // ---------- login ----------
     if (route === "login" && method === "POST") {
       let body;
       try { body = await readBody(req); } catch { return json({ error: "Bad request." }, 400); }
       const id = typeof body.user === "string" ? body.user.toLowerCase() : "";
       const pw = typeof body.password === "string" ? body.password : "";
-      const u = findUser(id);
+      const u = findUser(id) || (REG_ID.test(id) ? { id } : null); // built-in account, or a self-registered Cricket login
       if (!u || !pw || pw.length > MAX_PASSWORD) {
         await dummyCheck(pw.slice(0, MAX_PASSWORD));
         await sleep(700);
@@ -204,6 +331,13 @@ export default async (req, context) => {
         return json({ error: "Too many attempts. Try again in a few minutes." }, 429);
       }
       const rec = await loadUser(s, id, { init: true });
+      if (!rec && !findUser(id)) { // a well-formed Cricket login that was never registered
+        await dummyCheck(pw);
+        await recordFail(s, ipKey);
+        await recordFail(s, acctKey);
+        await sleep(700);
+        return json({ error: "Wrong user or password." }, 401);
+      }
       if (!rec) return json({ error: "This account has not been set up yet. Please contact the administrator." }, 503);
       if (!(await verifyPassword(pw, rec.cred))) {
         await recordFail(s, ipKey);

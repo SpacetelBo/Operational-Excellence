@@ -16,7 +16,7 @@
 html{scroll-padding-top:env(safe-area-inset-top,0px)}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-.main{max-width:1600px;margin:0 auto;padding:20px}
+.main{max-width:1600px;margin:0 auto;padding:20px 20px 72px}
 .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;box-shadow:0 2px 10px rgba(20,50,30,.07)}
 .up{display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:16px 20px;margin-bottom:16px}
 .up b{display:block;font-size:15px}.up span{color:var(--mut);font-size:12.5px}
@@ -115,10 +115,22 @@ table.it td.c{text-align:center;font-weight:700}
 <div id="ml" class="mlm hide"><div class="mlb"><h3 id="mlt">Login</h3>
 <p id="mlp">Select your name and enter your password to upload workbooks and view the log.</p>
 <select id="mlu" aria-label="Account"><option value="">Select your name</option></select>
+<input id="mlx" class="hide" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="vr6584@cricketlogin.com">
 <input id="mli" type="password" autocomplete="current-password" placeholder="Password">
 <div id="mlmsg" class="mle"></div>
 <div class="mlr"><button class="btn d" id="mlok" type="button">Log in</button><button class="btn" id="mlcancel" type="button" style="background:#8a9a8f">Cancel</button></div>
-<button class="lnk hide" id="mlpw" type="button">Change password</button></div></div>
+<button class="lnk hide" id="mlpw" type="button">Change password</button>
+<button class="lnk" id="mlnew" type="button">Create a new account (Cricket login)</button></div></div>
+<div id="rg" class="mlm hide"><div class="mlb"><h3>Create account</h3>
+<p id="rgp">Enter your Cricket login. A one-time code (OTP) is emailed to the back office, who will give it to you.</p>
+<input id="rg0" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="vr6584@cricketlogin.com">
+<button class="btn" id="rgsend" type="button">Send OTP</button>
+<div id="rgstep" class="hide" style="display:flex;flex-direction:column;gap:10px">
+<input id="rg1" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="6-digit OTP from the back office">
+<input id="rg2" type="password" autocomplete="new-password" placeholder="Choose a password (at least 8 characters)">
+<input id="rg3" type="password" autocomplete="new-password" placeholder="Confirm password"></div>
+<div id="rgmsg" class="mle"></div>
+<div class="mlr"><button class="btn d hide" id="rgok" type="button">Create account</button><button class="btn" id="rgcancel" type="button" style="background:#8a9a8f">Cancel</button></div></div></div>
 <div id="pc" class="mlm hide"><div class="mlb"><h3>Change password</h3>
 <p id="pcp">You are changing your own password.</p>
 <input id="pc0" type="password" autocomplete="current-password" placeholder="Current password">
@@ -355,23 +367,27 @@ function applyRole(){document.querySelectorAll('.adm').forEach(e=>e.classList.to
 let USERS_LOADED=false;
 async function loadUsers(){if(USERS_LOADED)return;
  try{const r=await fetch('/api/users',{cache:'no-store'});const d=await r.json();
-  $('mlu').innerHTML='<option value="">Select your name</option>'+(d.users||[]).map(u=>`<option value="${esc(u.id)}">${esc(u.name)}</option>`).join('');USERS_LOADED=true}
+  $('mlu').innerHTML='<option value="">Select your name</option>'+(d.users||[]).map(u=>`<option value="${esc(u.id)}">${esc(u.name)}</option>`).join('')+'<option value="__other">Cricket login user…</option>';USERS_LOADED=true}
  catch(e){$('mlmsg').textContent='Could not load the account list. Please refresh the page.'}}
+const mlSync=()=>{const o=$('mlu').value==='__other';$('mlx').classList.toggle('hide',!o);if(o)setTimeout(()=>$('mlx').focus(),30)};
+$('mlu').addEventListener('change',mlSync);
 function mlOpen(){const a=ROLE==='admin';$('ml').classList.remove('hide');
  $('mlt').textContent=a?'Signed in as '+(ME?ME.name:''):'Login';
- $('mlp').textContent=a?'You can upload workbooks, view the log and change your own password.':'Select your name and enter your password to upload workbooks and view the log.';
- $('mlu').classList.toggle('hide',a);$('mli').classList.toggle('hide',a);$('mlpw').classList.toggle('hide',!a);
- $('mli').value='';$('mlmsg').textContent='';$('mlok').textContent=a?'Log out':'Log in';
- if(!a)loadUsers().then(()=>setTimeout(()=>($('mlu').value?$('mli'):$('mlu')).focus(),50))}
+ $('mlp').textContent=a?'You can upload workbooks, view the log and change your own password.':'Select your name (or "Cricket login user") and enter your password to upload workbooks and view the log.';
+ $('mlu').classList.toggle('hide',a);$('mli').classList.toggle('hide',a);$('mlpw').classList.toggle('hide',!a);$('mlnew').classList.toggle('hide',a);
+ $('mli').value='';$('mlx').value='';$('mlmsg').textContent='';$('mlok').textContent=a?'Log out':'Log in';
+ if(a)$('mlx').classList.add('hide');else loadUsers().then(()=>{mlSync();setTimeout(()=>($('mlu').value?$('mli'):$('mlu')).focus(),50)})}
 const mlClose=()=>{$('ml').classList.add('hide');$('mli').value=''};
 $('mlbtn').onclick=mlOpen;$('mlcancel').onclick=mlClose;
 $('ml').addEventListener('click',e=>{if(e.target.id==='ml')mlClose()});
 $('mli').addEventListener('keydown',e=>{if(e.key==='Enter')$('mlok').click()});
+$('mlx').addEventListener('keydown',e=>{if(e.key==='Enter')$('mli').focus()});
 $('mlok').onclick=async()=>{
  if(ROLE==='admin'){setTok('');ROLE='viewer';ME=null;LOGS=[];LOGSREADY=false;VIEWING=null;$('vbar').classList.add('hide');mlClose();applyRole();
   await loadReport();render();toast('Logged out.');return}
- const user=$('mlu').value,pw=$('mli').value;
- if(!user){$('mlmsg').textContent='Select your name.';return}
+ let user=$('mlu').value;const pw=$('mli').value;
+ if(user==='__other')user=$('mlx').value.trim().toLowerCase();
+ if(!user){$('mlmsg').textContent=$('mlu').value==='__other'?'Enter your Cricket login (for example vr6584@cricketlogin.com).':'Select your name.';return}
  if(!pw){$('mlmsg').textContent='Enter your password.';return}
  const b=$('mlok');b.disabled=true;$('mlmsg').textContent='';
  try{const r=await fetch('/api/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user,password:pw})});
@@ -379,6 +395,41 @@ $('mlok').onclick=async()=>{
   if(r.ok&&d.token){setTok(d.token);ME=d.user||null;ROLE='admin';mlClose();applyRole();await loadReport();logRefresh();render();toast('Welcome, '+(ME?ME.name:'')+'.')}
   else $('mlmsg').textContent=d.error||'Wrong user or password.'}
  catch(e){$('mlmsg').textContent='Could not reach the server.'}
+ finally{b.disabled=false}};
+
+// ---------- create a new account (Cricket login + OTP emailed to the back office) ----------
+const RGID=/^[a-z]{2}[0-9]{4}@cricketlogin\.com$/;
+const rgClear=()=>['rg0','rg1','rg2','rg3'].forEach(i=>$(i).value='');
+function rgOpen(){mlClose();rgClear();$('rgmsg').textContent='';$('rgstep').classList.add('hide');$('rgok').classList.add('hide');
+ $('rgsend').textContent='Send OTP';$('rg0').disabled=false;$('rg').classList.remove('hide');setTimeout(()=>$('rg0').focus(),50)}
+const rgClose=()=>{$('rg').classList.add('hide');rgClear()};
+$('mlnew').onclick=rgOpen;$('rgcancel').onclick=rgClose;
+$('rg').addEventListener('click',e=>{if(e.target.id==='rg')rgClose()});
+$('rg0').addEventListener('keydown',e=>{if(e.key==='Enter')$('rgsend').click()});
+['rg1','rg2','rg3'].forEach(i=>$(i).addEventListener('keydown',e=>{if(e.key==='Enter')$('rgok').click()}));
+$('rgsend').onclick=async()=>{
+ const id=$('rg0').value.trim().toLowerCase(),m=$('rgmsg');
+ if(!RGID.test(id)){m.style.color='';m.textContent='Username must look like vr6584@cricketlogin.com: 2 letters, 4 digits, then @cricketlogin.com.';return}
+ const b=$('rgsend');b.disabled=true;m.textContent='';
+ try{const r=await fetch('/api/register/request',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:id})});
+  const d=await r.json().catch(()=>({}));
+  if(r.ok){$('rg0').value=id;$('rg0').disabled=true;$('rgstep').classList.remove('hide');$('rgok').classList.remove('hide');$('rgsend').textContent='Send a new OTP';
+   $('rgp').textContent='An OTP was emailed to the back office. Ask them for the code, then enter it below with the password you want. The code works for 10 minutes.';setTimeout(()=>$('rg1').focus(),50)}
+  else m.textContent=d.error||'Could not send the OTP.'}
+ catch(e){m.textContent='Could not reach the server.'}
+ finally{b.disabled=false}};
+$('rgok').onclick=async()=>{
+ const id=$('rg0').value.trim().toLowerCase(),otp=$('rg1').value.trim(),pw=$('rg2').value,cf=$('rg3').value,m=$('rgmsg');
+ if(!/^[0-9]{6}$/.test(otp)){m.textContent='Enter the 6-digit OTP.';return}
+ if(!pw){m.textContent='Choose a password.';return}
+ if(pw.length<8){m.textContent='The password must be at least 8 characters.';return}
+ if(pw!==cf){m.textContent='The password and the confirmation do not match.';return}
+ const b=$('rgok');b.disabled=true;m.textContent='';
+ try{const r=await fetch('/api/register/complete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:id,otp,password:pw})});
+  const d=await r.json().catch(()=>({}));
+  if(r.ok&&d.token){setTok(d.token);ME=d.user||null;ROLE='admin';rgClose();applyRole();await loadReport();logRefresh();render();toast('Account created. Welcome, '+(ME?ME.name:'')+'.')}
+  else m.textContent=d.error||'Could not create the account.'}
+ catch(e){m.textContent='Could not reach the server.'}
  finally{b.disabled=false}};
 
 // ---------- change my own password ----------
@@ -389,7 +440,7 @@ const pcClose=()=>{$('pc').classList.add('hide');pcClear()};
 $('mlpw').onclick=pcOpen;$('pccancel').onclick=pcClose;
 $('pc').addEventListener('click',e=>{if(e.target.id==='pc')pcClose()});
 ['pc0','pc1','pc2'].forEach(i=>$(i).addEventListener('keydown',e=>{if(e.key==='Enter')$('pcok').click()}));
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){mlClose();pcClose()}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){mlClose();pcClose();rgClose()}});
 $('pcok').onclick=async()=>{
  const cur=$('pc0').value,nw=$('pc1').value,cf=$('pc2').value,m=$('pcmsg');
  if(!cur){m.textContent='Enter your current password.';return}

@@ -1,23 +1,20 @@
 // Spacetel Operational Excellence - API
 //
 // Public  : GET  /api/report            latest published report (anyone can view)
-//           GET  /api/users             the account names shown in the login list (names only)
-//           POST /api/login             { user, password } -> session token
-//           POST /api/register/request  { username } -> emails a one-time code (OTP) to the back office
+//           POST /api/register/request  { username, name } -> emails a one-time code (OTP) to the back office
 //           POST /api/register/complete { username, otp, password } -> creates that account and signs in
-// Signed in (any of the four accounts):
-//           GET  /api/session           who am I (name comes from the signed session)
+//           POST /api/login             { user, password } -> session token
+// Signed in:
+//           GET  /api/session           who am I (the name comes from the signed session)
 //           POST /api/password          { current, next } change MY password
 //           POST /api/upload            publish a new report (+ save to the log, recorded under MY name)
 //           GET  /api/logs[?ts=...]     list the log / open one saved log
 //           DELETE /api/logs?ts=...     delete one log entry
 //
-// Everything marked "Signed in" is enforced here on the server. The user's identity is read from the
-// signed session token, never from anything the browser sends in the request body.
-//
-// Accounts: the first time an account is used, its initial password is taken from a Netlify environment
-// variable, hashed with scrypt and saved in Netlify Blobs. From then on Blobs is the source of truth:
-// changing a password in the app is saved there, and redeploying never overwrites it.
+// Every account is created by its owner: username = 2 letters + 4 digits + @cricketlogin.com, plus a name.
+// The one-time code goes ONLY to the back office, who gives it to the person. There are no built-in accounts
+// and no shared passwords. Everything marked "Signed in" is enforced here on the server; the identity comes
+// from the signed session token, never from anything the browser sends in the request body.
 
 import { getStore } from "@netlify/blobs";
 import crypto from "node:crypto";
@@ -25,15 +22,7 @@ import { promisify } from "node:util";
 
 const scrypt = promisify(crypto.scrypt);
 
-// The four accounts. `env` names the environment variable that supplies the INITIAL password only.
-const USERS = [
-  { id: "lokesh", name: "Lokesh", env: "LOKESH_PASSWORD" },
-  { id: "anand", name: "Anand", env: "ANAND_PASSWORD" },
-  { id: "upender", name: "Upender", env: "UPENDER_PASSWORD" },
-  { id: "venu", name: "Venu", env: "VENU_PASSWORD" },
-];
-
-// Self-service accounts: username must be exactly 2 letters + 4 digits + @cricketlogin.com (e.g. vr6584@cricketlogin.com).
+// Self-service accounts: username must be exactly 2 letters + 4 digits + @cricketlogin.com.
 // The one-time code is emailed ONLY to this address. The requester never sees it; the back office gives it to them.
 const OTP_TO = "backoffice@spacetelllc.com";
 const REG_ID = /^[a-z]{2}[0-9]{4}@cricketlogin\.com$/;
@@ -68,7 +57,6 @@ const sha = (s) => crypto.createHash("sha256").update(String(s)).digest("hex");
 const b64u = (buf) => Buffer.from(buf).toString("base64url");
 const eqBuf = (a, b) => a.length === b.length && crypto.timingSafeEqual(a, b);
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
-const findUser = (id) => USERS.find((u) => u.id === id);
 
 // ---------- password hashing (salted scrypt) ----------
 async function hashPassword(pw) {
@@ -89,22 +77,10 @@ const dummyCheck = async (pw) => {
   await verifyPassword(pw, DUMMY);
 };
 
-// ---------- account records in Netlify Blobs ----------
+// ---------- account records in Netlify Blobs (users/<username>) ----------
 const userKey = (id) => "users/" + id;
 
-// Returns the stored record. If the account has never been used, creates it from its environment
-// variable. The write is "only if new", so simultaneous first logins cannot overwrite each other and a
-// redeploy can never overwrite a password that was changed in the app.
-async function loadUser(s, id, { init }) {
-  const rec = await s.get(userKey(id), { type: "json" });
-  if (rec || !init) return rec;
-  const u = findUser(id);
-  const initial = u && process.env[u.env];
-  if (!initial) return null;
-  const fresh = { id: u.id, name: u.name, cred: await hashPassword(initial), ver: 1, createdAt: Date.now(), changedAt: null };
-  await s.setJSON(userKey(id), fresh, { onlyIfNew: true });
-  return await s.get(userKey(id), { type: "json" }); // whichever request won the race
-}
+const loadUser = (s, id) => s.get(userKey(id), { type: "json" });
 
 // ---------- sessions (signed tokens) ----------
 let cachedSecret = null;
@@ -139,7 +115,7 @@ async function authenticate(req, s) {
   let data;
   try { data = JSON.parse(Buffer.from(p, "base64url").toString()); } catch { return null; }
   if (!data || typeof data.u !== "string" || !(data.exp > Date.now())) return null;
-  const rec = await loadUser(s, data.u, { init: false });
+  const rec = await loadUser(s, data.u);
   if (!rec || rec.ver !== data.v) return null;
   return { id: rec.id, name: rec.name };
 }
@@ -162,29 +138,47 @@ const clientIp = (req, context) => context?.ip || req.headers.get("x-nf-client-c
 const normId = (v) => (typeof v === "string" ? v.trim().toLowerCase() : "");
 const pendingKey = (id) => "pending/" + sha(id).slice(0, 32);
 const otpHash = (secret, id, otp) => crypto.createHmac("sha256", secret).update("otp|" + id + "|" + otp).digest("hex");
-const displayName = (id) => id.split("@")[0].toUpperCase();
+// The person's name is what appears in the Log ("Updated By"). Names are unique so nobody can sign in as,
+// or be mistaken for, someone else.
+const cleanName = (v) => (typeof v === "string" ? v.normalize("NFC").replace(/\s+/g, " ").trim() : "");
+const NAME_RE = /^[\p{L}][\p{L} .'\u2019-]{1,39}$/u;
+const nameOk = (n) => NAME_RE.test(n) && (n.match(/\p{L}/gu) || []).length >= 2;
+const nameKey = (n) => "names/" + sha(n.toLowerCase().replace(/[^\p{L}]/gu, "")).slice(0, 32);
+// True if another account already uses this name, or is being created with it right now. A reservation whose
+// account no longer exists (it was deleted, or creation failed) is only cleared once it is a couple of minutes
+// old, so a sign-up that is half way through can never be taken over.
+const NAME_HOLD_MS = 2 * 60 * 1000;
+async function nameTaken(s, n) {
+  const r = await s.get(nameKey(n), { type: "json" });
+  if (!r) return false;
+  if (await s.get(userKey(r.id), { type: "json" })) return true;
+  if (Date.now() - (r.at || 0) < NAME_HOLD_MS) return true;
+  await s.delete(nameKey(n)).catch(() => {});
+  return false;
+}
 
 // Sends the code to the back office through Resend (https://resend.com). Needs RESEND_API_KEY.
 // OTP_FROM is optional; without it Resend's test sender is used, which can only deliver to the address the
 // Resend account was created with. To send from your own domain, verify the domain in Resend and set OTP_FROM.
-async function sendOtpEmail({ id, otp, ip, now }) {
+async function sendOtpEmail({ id, name, otp, ip, now }) {
   const key = process.env.RESEND_API_KEY;
   if (!key) throw Object.assign(new Error("email-not-configured"), { code: "noemail" });
   const from = process.env.OTP_FROM || "Operational Excellence <onboarding@resend.dev>";
   const when = new Date(now).toUTCString();
   const text =
     `Someone asked to create an account on the Operational Excellence dashboard.\n\n` +
-    `Username: ${id}\nOTP: ${otp}\nValid for 10 minutes.\n\n` +
+    `Name: ${name}\nUsername: ${id}\nOTP: ${otp}\nValid for 10 minutes.\n\n` +
     `Requested ${when} from IP ${ip}.\n\n` +
     `Give this OTP only to the person who owns this Cricket login. If you do not recognise the request, ignore this email.`;
+  const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const html =
     `<p>Someone asked to create an account on the <b>Operational Excellence</b> dashboard.</p>` +
-    `<p>Username: <b>${id}</b><br>OTP: <b style="font-size:20px;letter-spacing:3px">${otp}</b><br>Valid for 10 minutes.</p>` +
+    `<p>Name: <b>${esc(name)}</b><br>Username: <b>${id}</b><br>OTP: <b style="font-size:20px;letter-spacing:3px">${otp}</b><br>Valid for 10 minutes.</p>` +
     `<p style="color:#555">Requested ${when} from IP ${ip}.<br>Give this OTP only to the person who owns this Cricket login. If you do not recognise the request, ignore this email.</p>`;
   const r = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: { authorization: "Bearer " + key, "content-type": "application/json" },
-    body: JSON.stringify({ from, to: [OTP_TO], subject: `Operational Excellence OTP for ${id}`, text, html }),
+    body: JSON.stringify({ from, to: [OTP_TO], subject: `Operational Excellence OTP for ${name} (${id})`, text, html }),
   });
   if (!r.ok) throw new Error("email-failed-" + r.status);
 }
@@ -226,20 +220,21 @@ export default async (req, context) => {
       return json(out);
     }
 
-    if (route === "users" && method === "GET") {
-      return json({ users: USERS.map((u) => ({ id: u.id, name: u.name })) });
-    }
-
     // ---------- self-service sign-up, step 1: email a code to the back office ----------
     if (route === "register/request" && method === "POST") {
       if (process.env.SIGNUP_DISABLED === "1") return json({ error: "Creating accounts is turned off. Please contact the administrator." }, 403);
       let body;
       try { body = await readBody(req); } catch { return json({ error: "Bad request." }, 400); }
       const id = normId(body.username);
+      const name = cleanName(body.name);
       if (!REG_ID.test(id)) {
-        return json({ error: "Username must look like vr6584@cricketlogin.com: 2 letters, 4 digits, then @cricketlogin.com." }, 400);
+        return json({ error: "Username must be 2 letters, 4 numbers, then @cricketlogin.com." }, 400);
+      }
+      if (!nameOk(name)) {
+        return json({ error: "Enter your name (2 to 40 characters: letters, spaces, dots, hyphens or apostrophes; no numbers)." }, 400);
       }
       if (await s.get(userKey(id), { type: "json" })) return json({ error: "This username is already registered. Please log in instead." }, 409);
+      if (await nameTaken(s, name)) return json({ error: "This name is already used by another account. Add your surname or an initial." }, 409);
 
       const ip = clientIp(req, context);
       const ipKey = "throttle/otpip/" + sha(ip).slice(0, 32);
@@ -257,9 +252,9 @@ export default async (req, context) => {
       await recordFail(s, allKey, HOUR_MS);
 
       const otp = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
-      await s.setJSON(pendingKey(id), { createdAt: now, exp: now + OTP_TTL_MS, tries: 0, h: otpHash(await sessionSecret(s), id, otp) });
+      await s.setJSON(pendingKey(id), { createdAt: now, exp: now + OTP_TTL_MS, tries: 0, name, h: otpHash(await sessionSecret(s), id, otp) });
       try {
-        await sendOtpEmail({ id, otp, ip, now });
+        await sendOtpEmail({ id, name, otp, ip, now });
       } catch (e) {
         await s.delete(pendingKey(id)).catch(() => {});
         console.error("otp email failed:", e && e.message);
@@ -276,7 +271,7 @@ export default async (req, context) => {
       const id = normId(body.username);
       const otp = typeof body.otp === "string" ? body.otp.trim() : "";
       const pw = typeof body.password === "string" ? body.password : "";
-      if (!REG_ID.test(id)) return json({ error: "Username must look like vr6584@cricketlogin.com." }, 400);
+      if (!REG_ID.test(id)) return json({ error: "Username must be 2 letters, 4 numbers, then @cricketlogin.com." }, 400);
       if (!/^[0-9]{6}$/.test(otp)) return json({ error: "Enter the 6-digit OTP." }, 400);
       if (pw.length < MIN_PASSWORD) return json({ error: `The password must be at least ${MIN_PASSWORD} characters.` }, 400);
       if (pw.length > MAX_PASSWORD) return json({ error: "The password is too long." }, 400);
@@ -305,8 +300,14 @@ export default async (req, context) => {
         const left = MAX_OTP_TRIES - pend.tries;
         return json({ error: left > 0 ? `Incorrect OTP. ${left} attempt${left === 1 ? "" : "s"} left.` : "Incorrect OTP. Request a new OTP." }, 403);
       }
-      const rec = { id, name: displayName(id), cred: await hashPassword(pw), ver: 1, createdAt: Date.now(), changedAt: null, self: true };
+      // The name was given when the OTP was requested (the back office saw it in the email); it cannot be changed here.
+      const name = pend.name;
+      let held = await s.setJSON(nameKey(name), { id, name, at: Date.now() }, { onlyIfNew: true }); // reserve the name atomically
+      if (!held.modified && !(await nameTaken(s, name))) held = await s.setJSON(nameKey(name), { id, name, at: Date.now() }, { onlyIfNew: true });
+      if (!held.modified) return json({ error: "This name was just taken by another account. Request a new OTP with your surname or an initial added." }, 409);
+      const rec = { id, name, cred: await hashPassword(pw), ver: 1, createdAt: Date.now(), changedAt: null };
       const w = await s.setJSON(userKey(id), rec, { onlyIfNew: true }); // never overwrites an existing account
+      if (!w.modified) await s.delete(nameKey(name)).catch(() => {});
       await s.delete(pendingKey(id)).catch(() => {});
       if (!w.modified) return json({ error: "This username is already registered. Please log in instead." }, 409);
       const { token, exp } = await makeToken(s, rec);
@@ -317,33 +318,31 @@ export default async (req, context) => {
     if (route === "login" && method === "POST") {
       let body;
       try { body = await readBody(req); } catch { return json({ error: "Bad request." }, 400); }
-      const id = typeof body.user === "string" ? body.user.toLowerCase() : "";
+      const id = typeof body.user === "string" ? body.user.trim().toLowerCase() : "";
       const pw = typeof body.password === "string" ? body.password : "";
-      const u = findUser(id) || (REG_ID.test(id) ? { id } : null); // built-in account, or a self-registered Cricket login
-      if (!u || !pw || pw.length > MAX_PASSWORD) {
+      if (!REG_ID.test(id) || !pw || pw.length > MAX_PASSWORD) {
         await dummyCheck(pw.slice(0, MAX_PASSWORD));
         await sleep(700);
-        return json({ error: "Wrong user or password." }, 401);
+        return json({ error: "Wrong username or password." }, 401);
       }
       const ipKey = "throttle/ipuser/" + sha(clientIp(req, context) + "|" + id).slice(0, 32);
       const acctKey = "throttle/user/" + id;
       if ((await isBlocked(s, ipKey, MAX_FAILS_PER_IP_USER)) || (await isBlocked(s, acctKey, MAX_FAILS_PER_USER))) {
         return json({ error: "Too many attempts. Try again in a few minutes." }, 429);
       }
-      const rec = await loadUser(s, id, { init: true });
-      if (!rec && !findUser(id)) { // a well-formed Cricket login that was never registered
+      const rec = await loadUser(s, id);
+      if (!rec) { // well-formed username that was never registered: same answer and timing as a wrong password
         await dummyCheck(pw);
         await recordFail(s, ipKey);
         await recordFail(s, acctKey);
         await sleep(700);
-        return json({ error: "Wrong user or password." }, 401);
+        return json({ error: "Wrong username or password." }, 401);
       }
-      if (!rec) return json({ error: "This account has not been set up yet. Please contact the administrator." }, 503);
       if (!(await verifyPassword(pw, rec.cred))) {
         await recordFail(s, ipKey);
         await recordFail(s, acctKey);
         await sleep(700);
-        return json({ error: "Wrong user or password." }, 401);
+        return json({ error: "Wrong username or password." }, 401);
       }
       await s.delete(ipKey).catch(() => {});
       const { token, exp } = await makeToken(s, rec);

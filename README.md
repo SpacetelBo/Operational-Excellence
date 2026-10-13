@@ -5,85 +5,57 @@ Static dashboard (`public/index.html`) + one Netlify Function (`netlify/function
 | Who | Can do |
 |---|---|
 | **Anyone with the link (viewers)** | See the latest published report, use search / filters, tab switching, copy image, PNG, Excel export |
-| **Signed-in user** (Lokesh, Anand, Upender, Venu, or anyone who created a Cricket-login account) | Everything above, plus upload the workbook (publishes it for everyone), view / open / delete the **Log**, and **change their own password** |
+| **Signed-in user** | Everything above, plus upload the workbook (publishes it for everyone), view / open / delete the **Log**, and **change their own password** |
 
-Every user has their own account and password. Who you are is decided by the server from your login; the browser never tells the server a name. Upload, Log and password endpoints reject requests without a valid session, so hiding buttons is not the only protection.
+There are **no built-in or shared accounts**. Every user creates their own account (see below). The Log's **Updated By** column shows the user's **name** only.
 
-## What changed in this version
-- **Four individual accounts** replace the single shared master login.
-- **Log → Updated By** column: the name of the user who published each upload (older entries show `Legacy / unknown`).
-- **Change Password** inside the app (click your name at the bottom right → Change password). No Netlify or GitHub access needed.
+## Creating an account
+1. Open the site → **🔒 Login** → **Create a new account**.
+2. Enter **your name** and your **username**: 2 letters + 4 numbers + `@cricketlogin.com`. Anything else is rejected.
+3. Click **Send OTP**. A 6-digit code is emailed **only to `backoffice@spacetelllc.com`**, together with the name and username that asked. The requester never sees the code; the back office gives it to the person after checking who is asking.
+4. The person enters the code and chooses a password (at least 8 characters) → **Create account**. They are signed in straight away.
+5. Next time: **Login** → username + password. **Change password** is under the same button once signed in.
 
-Files changed: `public/index.html`, `netlify/functions/api.mjs`, `package.json` (Blobs library `^8` → `^10`), `README.md`. `netlify.toml`, `.gitignore` and `public/vendor/*` are unchanged.
+Rules enforced on the server:
+- The code is valid 10 minutes, works once, allows 5 wrong tries (parallel guesses included), and only one code per username per minute.
+- 5 codes per visitor per hour, 30 per hour overall (protects the back-office mailbox). The code is stored only as a hash.
+- **Names are unique** (ignoring capitals, spaces and dots), so nobody can appear in the Log as someone else. If a name is taken the person adds a surname or initial.
+- A username that exists can never be re-created or overwritten.
+- Every account has the same rights (publish, see and delete Log entries). The OTP is the approval step, so the back office should give a code only to people who are allowed to publish.
 
-## Creating your own account (Cricket login + OTP)
-Anyone with a Cricket login can create their own account:
+## One-time setup in Netlify
 
-1. Open the site → **🔒 Login** → **Create a new account (Cricket login)**.
-2. Enter the username in exactly this form: **2 letters + 4 digits + `@cricketlogin.com`**, for example `vr6584@cricketlogin.com`. Anything else is rejected.
-3. Click **Send OTP**. A 6-digit code is emailed **only to `backoffice@spacetelllc.com`**. The requester never sees it on screen; the back office gives it to the person once they have checked who is asking. (The email shows the username that was requested.)
-4. The person enters the OTP, chooses a password (at least 8 characters), and clicks **Create account**. They are signed in straight away.
-5. Later they log in with **Login → Cricket login user… →** their username and password, and can use **Change password** like everyone else.
+### 1. Environment variables (Site configuration → Environment variables)
+| Variable | Value |
+|---|---|
+| `SESSION_SECRET` | a long random string (40+ characters). Keep it the same forever; changing it signs everyone out |
+| `RESEND_API_KEY` | API key from [Resend](https://resend.com) (see below). Needed for the OTP email |
+| `OTP_FROM` | *optional* sender, only after you verify your domain in Resend, e.g. `Operational Excellence <noreply@spacetelllc.com>` |
+| `SIGNUP_DISABLED` | *optional*, set to `1` to stop new accounts (existing accounts keep working) |
 
-Rules enforced on the server: the code is valid for 10 minutes, works once, allows 5 wrong tries (parallel guesses included), at least 60 s between codes for one username, 5 codes per visitor per hour and 30 per hour overall (so nobody can flood the back-office mailbox). The code is stored only as a hash. A username that already exists can never be re-created or overwritten.
+No passwords are stored in Netlify or in the code. (Older versions used `LOKESH_PASSWORD`, `ANAND_PASSWORD`, etc. and `MASTER_PASSWORD`; they are no longer used and can be deleted.)
 
-In the Log, **Updated By** shows the part before the `@` in capitals (`vr6584@cricketlogin.com` → `VR6584`).
+### 2. Email through Resend
+Netlify cannot send email by itself.
+1. Create a free Resend account **using `backoffice@spacetelllc.com`** and create an API key.
+2. Add it in Netlify as `RESEND_API_KEY`, then redeploy.
+3. Without more setup, Resend sends from its test address, which as far as I know only delivers to the email the Resend account was created with, which is why step 1 matters. To send from your own address, verify `spacetelllc.com` in Resend and set `OTP_FROM`. (Check Resend's current documentation for its sender rules.)
 
-**Important:** every account, including self-created ones, has the same rights (upload and publish, see and delete Log entries). The OTP is the approval step, so the back office should give a code only to people who are allowed to publish.
-
-### One-time email setup (needed for the OTP email)
-Netlify cannot send email by itself, so this uses [Resend](https://resend.com) (free plan is enough for this use).
-1. Create a Resend account **using `backoffice@spacetelllc.com`** and create an API key.
-2. In Netlify add the environment variable `RESEND_API_KEY` with that key, then redeploy.
-3. Without any further setup, emails are sent from Resend's test address, which Resend only allows to deliver to the email the account was created with, which is why step 1 matters. To send from your own address instead, verify the domain `spacetelllc.com` in Resend and also add `OTP_FROM`, for example `Operational Excellence <noreply@spacetelllc.com>`.
-4. Optional: `SIGNUP_DISABLED` = `1` switches self-service sign-up off (existing accounts keep working).
-
-(Check Resend's current documentation for its sender and domain rules; they are outside this project.)
-
-### Removing a self-created user / forgotten password
-Delete that user's record from the Netlify Blobs store `operational-excellence`, key `users/vr6584@cricketlogin.com` (Blobs page of the site, or `netlify blobs:delete operational-excellence users/vr6584@cricketlogin.com`; check `netlify blobs:delete --help`). It takes effect immediately, even for a browser that is still signed in. For a forgotten password the person simply creates the account again with a new OTP.
-
-## Deploy / update (GitHub → Netlify)
-
-### A. First setup, or moving to this version
-1. Copy these files over your existing repo (keep the same folder structure), then:
-   ```bash
-   git add .
-   git commit -m "Individual logins, Updated By log column, change password"
-   git push
-   ```
-   Netlify redeploys automatically (publish `public`, functions `netlify/functions`, no build command).
-2. In Netlify: **Site configuration → Environment variables** add these (they are **not** in the code or the ZIP):
-
-   | Variable | Value |
-   |---|---|
-   | `LOKESH_PASSWORD` | Lokesh's initial password |
-   | `ANAND_PASSWORD` | Anand's initial password |
-   | `UPENDER_PASSWORD` | Upender's initial password |
-   | `VENU_PASSWORD` | Venu's initial password |
-   | `SESSION_SECRET` | a long random string (e.g. 40+ random characters). Keep it the same forever; changing it signs everyone out |
-   | `RESEND_API_KEY` | only needed for self-service sign-up, see "One-time email setup" above |
-
-   Set the variables **before** the first login. Then **Deploys → Trigger deploy → Deploy site** so the function sees them.
-3. Open the site → **🔒 Login** → pick your name → enter your initial password. Then use **Change password** to pick your own.
-
-### B. How accounts are stored
-- The first time an account logs in, its initial password (from the environment variable) is hashed with salted scrypt and saved in Netlify Blobs (`users/<name>`). Plain passwords are never stored.
-- After that, **Blobs is the source of truth**. Redeploying, or changing/removing the environment variables, does **not** change an existing account's password.
-- If two people hit a brand-new account at the same moment, only one record is created (conditional "only if new" write).
-
-### C. Forgot a password
-There is no email reset. To reset one account: delete that account's record from the site's Blobs store (`operational-excellence`, key `users/<name>`, e.g. `users/anand`) using the Netlify CLI (`netlify blobs:delete operational-excellence users/anand`) or the Blobs page of your site in the Netlify dashboard, make sure the matching `*_PASSWORD` variable holds the temporary password you want, and have the user log in with it, then change it. (Check the exact CLI syntax with `netlify blobs:delete --help`.)
+### 3. Deploy (GitHub → Netlify)
+Publish directory `public`, functions directory `netlify/functions`, no build command (all read from `netlify.toml`). Every change pushed to GitHub redeploys. On the free plan each deploy uses credits, so combine changes into **one** upload.
 
 ## Daily use
-- Log in, upload the day's Excel workbook. It is processed in the browser, then published. Everyone who opens (or refreshes) the site sees it.
-- Each publish is saved to the **Log** tab with your name (the latest 100 are kept). Re-uploading identical data updates the report but is not logged twice.
-- Sessions last 12 hours or until the tab is closed / Log out. Changing your password keeps *this* browser signed in; any other browser signed in as you is signed out.
+- Log in and upload the day's Excel workbook. It is processed in the browser, then published. Everyone who opens or refreshes the site sees it.
+- Each publish is saved to the **Log** tab under your name (the latest 100 are kept). Re-uploading identical data updates the report but is not logged twice.
+- Sessions last 12 hours or until the tab is closed / Log out. After changing your password, other browsers signed in as you are signed out.
+
+## Removing a user, or a forgotten password
+In the site's Netlify Blobs store `operational-excellence`, delete the key `users/<their username>`. It takes effect immediately, even for a browser still signed in, and their name becomes free for reuse after about 2 minutes. (Use the Blobs page of the site, or `netlify blobs:delete operational-excellence users/<username>`; check `netlify blobs:delete --help`.) A person with a forgotten password simply creates the account again with a new OTP.
 
 ## Security notes
-- Passwords: salted scrypt, verified on the server only. Minimum 8 characters for new passwords.
-- Sessions: signed with `SESSION_SECRET`; the account is re-checked on every request. (If `SESSION_SECRET` is missing, a random secret is generated once and kept in Blobs, but please set it.)
-- Brute-force protection is stored in Blobs, so it applies across all function instances: 8 wrong passwords per visitor per account, 30 per account overall, within 15 minutes. Wrong "current password" attempts on the change form are limited the same way.
+- Passwords: salted scrypt, verified on the server only; minimum 8 characters.
+- Sessions: signed with `SESSION_SECRET`; the account is re-checked on every request. (If `SESSION_SECRET` is missing a random one is generated once and kept in Blobs, but please set it.)
+- Brute-force protection is stored in Blobs, so it applies across all function instances: 8 wrong passwords per visitor per account, 30 per account overall, per 15 minutes; the change-password form is limited the same way.
 - Reports are visible to anyone with the URL. For a restricted audience use Netlify's site password / SSO (paid plans) or keep the URL private.
 - Libraries (SheetJS, ExcelJS, html2canvas) are bundled in `public/vendor`. Only the Inter font is loaded from Google Fonts.
 
@@ -91,18 +63,18 @@ There is no email reset. To reset one account: delete that account's record from
 ```bash
 npm i -g netlify-cli
 npm install
-# create a local .env (git-ignored) with LOKESH_PASSWORD, ANAND_PASSWORD, UPENDER_PASSWORD, VENU_PASSWORD, SESSION_SECRET
+# local .env (git-ignored): SESSION_SECRET, RESEND_API_KEY
 netlify dev        # http://localhost:8888
 ```
 
-## Test plan after deploying (about 10 minutes)
-1. Log in as each of the four users with their initial password → each sees upload + Log.
-2. Wrong password, and another person's password, → "Wrong user or password."; the 9th quick failure shows "Too many attempts".
-3. As Lokesh upload a workbook → Log shows Updated By = Lokesh. Repeat as Anand and Venu → names match.
-4. Open a log, go back, delete a test log.
-5. As Anand: **Change password** with a wrong current password (error), a 5-character new password (error), mismatched confirmation (error), then a valid change → success, still signed in.
-6. Log out → old password fails, new password works.
-7. **Persistence:** Deploys → Trigger deploy. After it finishes, log in with the *new* password (it must work) and the *original* password must fail.
-8. Open the site in a private window (not logged in): the report shows with filters, no upload box, no Log tab. Visit `/api/logs` in that window → `{"error":"Login required."}`.
-9. **New account:** Login → Create a new account → enter a test username such as `ab1234@cricketlogin.com` → Send OTP. Check the back-office mailbox (and spam) for the email, enter the code and a password → you are signed in as `AB1234`. Publish a workbook and check the Log shows `AB1234`. Then delete the test record (see "Removing a self-created user").
-10. A wrong username format (for example `abc123@cricketlogin.com` or `ab1234@gmail.com`) must be rejected, and a second OTP request within 60 seconds must be refused.
+## Test plan after deploying
+1. Viewer (private window): report with filters shows; no upload box, no Log tab; `/api/logs` answers `{"error":"Login required."}`.
+2. Login box shows only **Username** and **Password**, with no name list and no example.
+3. **Create a new account** with a test name and username → Send OTP → the back-office inbox (and spam) gets the code, with the name and username in the email.
+4. Enter a wrong code (error), then the right code and a password → signed in under your name.
+5. Upload a workbook → Log shows your **name** under Updated By.
+6. Try the same name for a second username → refused ("already used").
+7. A wrong username format and a second OTP request within a minute are refused.
+8. Change password: wrong current (error), short new (error), mismatch (error), valid → still signed in. Log out → old password fails, new one works.
+9. Trigger a deploy, then log in with the new password (must still work).
+10. Delete the test user (see "Removing a user").

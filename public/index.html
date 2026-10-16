@@ -87,6 +87,12 @@ table.it td.c{text-align:center;font-weight:700}
 .mlb select{border:1px solid #c9d3cb;border-radius:8px;padding:9px 10px;font:inherit;background:#fff;color:#1c2a22}.mlb .lnk{background:none;border:0;padding:0;color:#1f6fb5;font:600 12.5px Inter,system-ui,sans-serif;cursor:pointer;text-align:left}.mlb .lnk:hover{text-decoration:underline}
 .mle{color:#c62828;font-size:12.5px;min-height:16px}.mlr{display:flex;gap:8px}
 #toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:#1c2a22;color:#fff;padding:10px 18px;border-radius:8px;font-size:13px;display:none;z-index:9}
+
+/* Hide Netlify-hosted badges/widgets without changing the dashboard layout. */
+#netlify-badge, .netlify-badge, [data-netlify-badge],
+iframe[src*="netlify.com"], iframe[src*="netlify.app"],
+a[href*="app.netlify.com/sites/"] img,
+a[href*="app.netlify.com/sites/"] { display:none !important; visibility:hidden !important; }
 </style></head><body>
 <div class="main">
  <div class="card up adm hide" id="upcard">
@@ -648,5 +654,21 @@ async function exportTrn(full){try{
  const buf=await wb.xlsx.writeBuffer();
  saveFile(full?'Training_Compliance_Report.xlsx':'Training_Compliance.xlsx',new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}))}catch(e){toast('Excel failed: '+e.message)}}
 $('xl').onclick=()=>TAB==='trn'?exportTrn(false):exportXlsx(false);
+
+// Remove a Netlify badge/widget if the hosting layer injects it after page load.
+(function removeNetlifyBadge(){
+  const selectors = '#netlify-badge, .netlify-badge, [data-netlify-badge], iframe[src*="netlify.com"], iframe[src*="netlify.app"], a[href*="app.netlify.com/sites/"]';
+  function clean(root){
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll(selectors).forEach(el => el.remove());
+  }
+  clean(document);
+  new MutationObserver(records => records.forEach(record => record.addedNodes.forEach(node => {
+    if (node.nodeType === 1) {
+      if (node.matches && node.matches(selectors)) node.remove();
+      else clean(node);
+    }
+  }))).observe(document.documentElement, {childList:true, subtree:true});
+})();
 init();
 </script></body></html>
